@@ -2,36 +2,24 @@ import logging
 import os
 import json
 import csv
-import signal
-import requests
+import random
 import asyncio
 import aiohttp
 
-# loop = asyncio.get_event_loop()
-session = aiohttp.ClientSession()
+API_URL = "https://2swdepm0wa.execute-api.us-east-1.amazonaws.com/prod/NavaInterview/measures"
 
 
-async def post_data_to_server(json_row, session):
+async def post_data_to_server(json_row):
+    async with aiohttp.ClientSession() as session:
+        async with session.post(API_URL, data=json_row) as resp:
+            return await resp.json(), resp.status
 
-    async with session.post("https://2swdepm0wa.execute-api.us-east-1.amazonaws.com/prod/NavaInterview/measures",
-                     data=json_row) as resp:
-        return await resp.json()
-
-# def signal_handler(signal, frame):
-#     loop.stop()
-#     session.close()
-#     sys.exit(0)
-#
-#
-# signal.signal(signal.SIGINT, signal_handler)
 
 if __name__ == "__main__":
 
-    logging.info('Reading schema files')
-
     for root, dirs, files in os.walk('schemas/'):
         for file in files:
-
+            print('Reading schema file ' + file)
             # Open each schema file and read it to a list
             with open('schemas/' + file) as csv_file:
                 cvs_reader = csv.reader(csv_file, delimiter=',')
@@ -46,6 +34,7 @@ if __name__ == "__main__":
 
             # Create a new data_row dict and build up what will become the json object
             # for each row of data
+            print('Reading data files ' + data_filename)
             data_row = {}
             for row in data:
                 for scheme in schema:
@@ -67,10 +56,41 @@ if __name__ == "__main__":
                 data_row_json = json.dumps(data_row)
 
                 # For each row, post the data to the server
-
                 loop = asyncio.get_event_loop()
-                loop.run_until_complete(post_data_to_server(data_row_json, session))
 
-                loop.run_until_complete(asyncio.sleep(100))
-                loop.close()
+                # Repeat as necessary until max attempts are reached
+                attempts = 1
+                while True:
+                    resp_json, status = loop.run_until_complete(post_data_to_server(data_row_json))
+                    if random.choice(range(2)) == 1:
+                        status = 400
+                    print(status)
+                    # Check that both the request status code is good
+                    # and that the response data matches the data we sent
+                    if status == 201 and resp_json == data_row:
+                        logging.info('POST request successful for measure_id: {}'.format(data_row['measure_id']))
+                        break
+                    elif attempts > 5:
+                        # If the request is failing after 5 tries, raise an exception
+                        # and log the error. Also, would want to update metrics here, etc.
+                        if status is not 201:
+                            logging.error('POST request has failed too many times for measure_id: {}'.format(data_row['measure_id']))
+                            raise Exception('POST request has failed too many times for measure_id: {}'.format(data_row['measure_id']))
+                        elif resp_json != data_row:
+                            logging.error('Data returned from server does not match for measure_id: {}'.format(data_row['measure_id']))
+                            raise Exception('Data returned from server does not match for measure_id: {}'.format(data_row['measure_id']))
+                        break
+                    else:
+                        attempts += 1
+                        logging.warning('Retrying request for measure_id {} - Attempt number {}'.format(data_row['measure_id'].strip(), attempts))
 
+                        # choose a random back off interval so that if the server
+                        # is down, requests don't all pile up at the same time
+                        backoff_interval = random.random()
+                        loop.run_until_complete(asyncio.sleep(backoff_interval))
+
+                        continue
+
+            # If it made it this far without raising an exception, all went well
+            print('Data transfer for ' + data_filename + ' was successful')
+            logging.info('Data transfer for ' + data_filename + ' was successful.')
